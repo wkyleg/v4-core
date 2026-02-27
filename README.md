@@ -45,6 +45,8 @@ The callback logic, may be updated by the hooks dependent on their implementatio
 
 All contracts are held within the `v4-core/src` folder.
 
+AgentForge demo simulations for deterministic and LLM-powered Uniswap v4 scenarios live under `v4-core/sim/agentforge-demo`. See `v4-core/sim/agentforge-demo/docs/RUNBOOK.md` for run and dashboard commands.
+
 Note that helper contracts used by tests are held in the `v4-core/src/test` subfolder within the `src` folder. Any new test helper contracts should be added here, but all foundry tests are in the `v4-core/test` folder.
 
 ```markdown

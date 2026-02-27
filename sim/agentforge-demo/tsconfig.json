@@ -1,0 +1,23 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"lib": ["ES2022"],
+		"strict": true,
+		"noEmit": true,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"skipLibCheck": true,
+		"resolveJsonModule": true,
+		"types": ["node", "vitest/globals"]
+	},
+	"include": [
+		"agents/**/*.ts",
+		"lib/**/*.ts",
+		"packs/**/*.ts",
+		"scenarios/**/*.ts",
+		"scripts/**/*.ts",
+		"tests/**/*.ts"
+	]
+}
