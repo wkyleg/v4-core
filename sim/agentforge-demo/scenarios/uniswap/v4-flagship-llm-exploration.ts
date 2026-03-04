@@ -94,6 +94,15 @@ const scenario = defineScenario({
 	gossip: {
 		channels: [
 			{ id: "global", type: "global" },
+			{
+				id: "strategy",
+				type: "topic",
+				members: [
+					"UniswapLlmStrategistAgent-0",
+					"UniswapLlmStrategistAgent-1",
+					"UniswapLlmStrategistAgent-2",
+				],
+			},
 			{ id: "risk", type: "topic" },
 			{ id: "alpha", type: "topic" },
 		],
