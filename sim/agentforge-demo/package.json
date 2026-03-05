@@ -22,7 +22,7 @@
 		"studio:open": "forge-sim studio --root ./results --port 0 --open"
 	},
 	"dependencies": {
-		"@elata-biosciences/agentforge": "link:../../../agentforge"
+		"@elata-biosciences/agentforge": "^0.2.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.0",
