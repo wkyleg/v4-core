@@ -6,3 +6,6 @@ cache/
 *.sol
 dist/
 snapshots/
+sim/agentforge-demo/results/
+sim/agentforge-demo/coverage/
+sim/agentforge-demo/node_modules/
