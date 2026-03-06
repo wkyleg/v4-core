@@ -6,3 +6,4 @@ cache/
 *.sol
 dist/
 snapshots/
+sim/agentforge-demo/

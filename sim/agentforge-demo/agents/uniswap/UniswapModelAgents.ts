@@ -23,28 +23,8 @@ type PoolView = {
 type NormalizedLlmAction = {
 	name: string;
 	params: Record<string, unknown>;
-	intentTag: string;
 	rationale: string;
 };
-const ALLOWED_GOSSIP_INTENT_TAGS = new Set([
-	"inform",
-	"persuade",
-	"coordinate",
-	"deceive",
-	"probe",
-	"other",
-	"creator",
-	"economic",
-	"bad_actor",
-	"saboteur",
-	"hacker",
-	"observer",
-]);
-
-function normalizeGossipIntentTag(tag: string): string {
-	const normalized = tag.trim().toLowerCase();
-	return ALLOWED_GOSSIP_INTENT_TAGS.has(normalized) ? normalized : "other";
-}
 
 function getPools(ctx: TickContext): PoolView[] {
 	const world = ctx.world as {
@@ -129,7 +109,7 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 	private llm: LlmClient | null = null;
 	private resolvedProvider: LlmProviderConfig["provider"] | null = null;
 
-	override async step(ctx: TickContext): Promise<Action | null> {
+	override async step(ctx: TickContext): Promise<Action | Action[] | null> {
 		const pools = getPools(ctx);
 		if (pools.length === 0) return null;
 		this.remember("lastTick", ctx.tick);
@@ -144,7 +124,6 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 			this.remember("lastDecision", {
 				tick: ctx.tick,
 				actionName: "PostMessage",
-				intentTag: "strategy",
 				provider: this.resolvedProvider ?? "openai",
 				rationale: "scheduled_strategy_summary",
 			});
@@ -152,14 +131,12 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 				id: this.generateActionId("PostMessage", ctx.tick),
 				name: "PostMessage",
 				params: {
-					channelId: "global",
+					channelId: "strategy",
 					text,
-					intentTag: "coordinate",
 				},
 				metadata: {
 					role: "llm_strategist",
 					provider: this.resolvedProvider ?? "openai",
-					intentTag: "coordinate",
 					rationale: "scheduled_strategy_summary",
 				},
 			};
@@ -167,13 +144,23 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 
 		try {
 			const client = this.getClient();
+
+			const messages = ctx.gossip?.readInbox(this.id) ?? [];
+			const recentMessages = messages.slice(-6).map(
+				(m) => `[${m.envelope.channelId}] ${m.envelope.authorAgentId}: ${m.payload.text}`,
+			);
+			const lastDecision = this.recall<Record<string, unknown>>("lastDecision");
+			const lastLlmRaw = this.recall<string>("lastLlmRaw");
+
 			const completion = await client.complete({
 				model: this.getParam<string>(
 					"model",
 					process.env.OPENAI_MODEL ?? "gpt-4o-mini",
 				),
 				system:
-					'You are a Uniswap v4 strategist. Output strict JSON only with one action: {"name":"u4_swap|u4_modify_liquidity|u4_set_hook_mode|PostMessage|QueryWorld","params":{...},"rationale":"..."}',
+					'You are a Uniswap v4 strategist. You may return a single action or multiple actions: {"actions":[...]} (max 3). '
+					+ 'Available actions: u4_swap, u4_modify_liquidity, u4_set_hook_mode, PostMessage, QueryWorld. '
+					+ 'Output strict JSON: {"name":"...","params":{...},"rationale":"..."} or {"actions":[{...},{...}]}',
 				user: JSON.stringify({
 					tick: ctx.tick,
 					pools,
@@ -183,46 +170,56 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 						volatility: (ctx.world as UniswapWorldView).realizedVolatility,
 						mev: (ctx.world as UniswapWorldView).mevPressureIndex,
 					},
+					lastResult: ctx.lastResult ?? null,
+					lastDecision: lastDecision ?? null,
+					lastLlmSummary: lastLlmRaw?.slice(0, 200) ?? null,
+					gossip: recentMessages.length > 0 ? recentMessages : null,
+					actionTemplates: ctx.capabilities?.actionTemplates ?? null,
 				}),
 			});
-			const parsed = this.parseJson(completion);
-			if (
-				!parsed ||
-				typeof parsed.name !== "string" ||
-				typeof parsed.params !== "object"
-			) {
-				if (liveRequired) {
-					throw new Error("llm_response_parse_failed");
-				}
+			const raw = this.parseJson(completion);
+			if (!raw) {
+				if (liveRequired) throw new Error("llm_response_parse_failed");
 				return this.fallbackAction(ctx, pools);
 			}
-			const normalized = this.normalizeLlmAction(
-				parsed.name,
-				parsed.params as Record<string, unknown>,
-				typeof parsed.intentTag === "string" ? parsed.intentTag : "strategy",
-				typeof parsed.rationale === "string" ? parsed.rationale : "none",
-				ctx,
-				pools,
-			);
+
+			const items: Record<string, unknown>[] = Array.isArray(raw.actions) ? (raw.actions as Record<string, unknown>[]) : [raw];
+			const actions: Action[] = [];
+
+			for (const item of items.slice(0, 3)) {
+				if (typeof item.name !== "string" || typeof item.params !== "object") continue;
+				const normalized = this.normalizeLlmAction(
+					item.name,
+					item.params as Record<string, unknown>,
+					typeof item.rationale === "string" ? item.rationale : "none",
+					ctx,
+					pools,
+				);
+				actions.push({
+					id: this.generateActionId(normalized.name, ctx.tick),
+					name: normalized.name,
+					params: normalized.params,
+					metadata: {
+						role: "llm_strategist",
+						provider: this.resolvedProvider ?? "none",
+						rationale: normalized.rationale.slice(0, 240),
+					},
+				});
+			}
+
+			if (actions.length === 0) {
+				if (liveRequired) throw new Error("llm_response_parse_failed");
+				return this.fallbackAction(ctx, pools);
+			}
+
 			this.remember("lastLlmRaw", completion.slice(0, 300));
 			this.remember("lastDecision", {
 				tick: ctx.tick,
-				actionName: normalized.name,
-				intentTag: normalized.intentTag,
+				actionName: actions[0]!.name,
 				provider: this.resolvedProvider ?? "none",
-				rationale: normalized.rationale.slice(0, 240),
+				rationale: (actions[0]!.metadata as Record<string, unknown>)?.rationale ?? "none",
 			});
-			return {
-				id: this.generateActionId(normalized.name, ctx.tick),
-				name: normalized.name,
-				params: normalized.params,
-				metadata: {
-					role: "llm_strategist",
-					provider: this.resolvedProvider ?? "none",
-					intentTag: normalized.intentTag,
-					rationale: normalized.rationale.slice(0, 240),
-				},
-			};
+			return actions.length === 1 ? actions[0]! : actions;
 		} catch (error) {
 			if (liveRequired) {
 				throw error;
@@ -241,7 +238,6 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 			this.remember("lastDecision", {
 				tick: ctx.tick,
 				actionName: "PostMessage",
-				intentTag: "inform",
 				provider: this.resolvedProvider ?? "fallback",
 				rationale: "fallback_gossip",
 				poolId: target.id,
@@ -250,21 +246,18 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 				id: this.generateActionId("PostMessage", ctx.tick),
 				name: "PostMessage",
 				params: {
-					channelId: "global",
+					channelId: "strategy",
 					text: `llm_fallback tick=${ctx.tick} pool=${target.id} imbalance=${target.orderImbalance.toFixed(3)}`,
-					intentTag: "inform",
 				},
 				metadata: {
 					role: "llm_fallback",
 					provider: this.resolvedProvider ?? "fallback",
-					intentTag: "inform",
 				},
 			};
 		}
 		this.remember("lastDecision", {
 			tick: ctx.tick,
 			actionName: "u4_swap",
-			intentTag: "rebalance",
 			provider: this.resolvedProvider ?? "fallback",
 			rationale: "fallback_swap",
 			poolId: target.id,
@@ -280,7 +273,6 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 			metadata: {
 				role: "llm_fallback",
 				provider: this.resolvedProvider ?? "fallback",
-				intentTag: "rebalance",
 			},
 		};
 	}
@@ -324,7 +316,6 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 	private normalizeLlmAction(
 		name: string,
 		params: Record<string, unknown>,
-		intentTag: string,
 		rationale: string,
 		ctx: TickContext,
 		pools: PoolView[],
@@ -347,24 +338,16 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 				5_000,
 				Math.min(150_000, Math.floor(amountRaw)),
 			);
-			return {
-				name,
-				params: { poolId, side, amountIn },
-				intentTag,
-				rationale,
-			};
+			return { name, params: { poolId, side, amountIn }, rationale };
 		}
 		if (name === "u4_modify_liquidity") {
 			if (ctx.tick % 5 === 1) {
-				const gossipIntentTag = normalizeGossipIntentTag(intentTag);
 				return {
 					name: "PostMessage",
 					params: {
-						channelId: "global",
+						channelId: "strategy",
 						text: `llm_liquidity_view tick=${ctx.tick} ${rationale.slice(0, 120)}`,
-						intentTag: gossipIntentTag,
 					},
-					intentTag: gossipIntentTag,
 					rationale,
 				};
 			}
@@ -384,12 +367,7 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 				-1_250_000,
 				Math.min(1_250_000, Math.floor(deltaRaw)),
 			);
-			return {
-				name,
-				params: { poolId: poolId || fallbackPool.id, deltaLiquidity },
-				intentTag,
-				rationale,
-			};
+			return { name, params: { poolId: poolId || fallbackPool.id, deltaLiquidity }, rationale };
 		}
 		if (name === "u4_set_hook_mode") {
 			const poolId =
@@ -400,17 +378,9 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 				params.hookMode === "anti_mev"
 					? params.hookMode
 					: "volatility_reactive";
-			return {
-				name,
-				params: { poolId, hookMode },
-				intentTag,
-				rationale,
-			};
+			return { name, params: { poolId, hookMode }, rationale };
 		}
 		if (name === "PostMessage") {
-			const gossipIntentTag = normalizeGossipIntentTag(
-				typeof params.intentTag === "string" ? params.intentTag : intentTag,
-			);
 			const text =
 				typeof params.text === "string"
 					? params.text
@@ -419,23 +389,18 @@ export class UniswapLlmStrategistAgent extends BaseAgent {
 				name,
 				params: {
 					channelId:
-						typeof params.channelId === "string" ? params.channelId : "global",
+						typeof params.channelId === "string" ? params.channelId : "strategy",
 					text,
-					intentTag: gossipIntentTag,
 				},
-				intentTag: gossipIntentTag,
 				rationale,
 			};
 		}
-		const gossipIntentTag = normalizeGossipIntentTag(intentTag);
 		return {
 			name: "PostMessage",
 			params: {
-				channelId: "global",
+				channelId: "strategy",
 				text: `llm_strategy tick=${ctx.tick} pool=${fallbackPool.id} action=${name}`,
-				intentTag: gossipIntentTag,
 			},
-			intentTag: gossipIntentTag,
 			rationale: `Unsupported action "${name}" coerced to gossip post.`,
 		};
 	}
